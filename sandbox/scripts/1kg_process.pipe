@@ -1,0 +1,117 @@
+//########################################
+// Working with 1000GP Phase 3 data and various tasks
+// Assume we have 1000GP Phase 3 data download from ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/release/20130502/
+//######################
+
+//###################
+// Converting to PLINK format
+//##################
+
+//Define Software locations
+PLINK='/medpop/srlab/yang/software/plink'
+ADMIXTURE='/medpop/srlab/yang/software/admixture_linux-1.23/admixture'
+R {
+    executable = "/broad/software/free/Linux/redhat_5_x86_64/pkgs/r_3.1.0-bioconductor-2.14/bin/R"
+}
+
+//#####################
+//# Working with bi-allelic SNPs only
+//##################
+G1K='/medpop/srlab/TB/1000g/all'
+
+//Data pruning
+prune = {
+ exec """ 
+	//1. pruning common variants
+	$PLINK --bfile $G1K --maf 0.01 --indep-pairwise 50 10 0.1 --out all
+	//2. output pruned file
+	$PLINK --bfile $G1K --extract all.prune.in --make-bed --out prunedALL
+	"""
+}
+
+//######################
+//# Principal component analysis
+//####################
+pcs = {
+	exec """ $PLINK --bfile prunedALL --pca --out all"""
+}
+
+// ploting
+pca_plot = R {"""
+###PC plots###
+x<-read.table("all.eigenvec",h=F,stringsAsFactors = T)
+df<-data.frame(x)
+
+library(ggplot2)
+
+pop<-read.table("g1k_samples.txt",h=T,stringsAsFactors = F)
+df$POP<-pop[match(df$V1,pop$ID),]$POP
+df$REGION<-pop[match(df$V1,pop$ID),]$GROUP
+#df$REGION[df$REGION=="AMR"]<-df$POP[df$REGION=="AMR"]
+ggplot(df,aes(x=V3,y=V4,colour=REGION))+geom_point()+xlab("PC1")+ylab("PC2")+theme_bw()+
+  scale_color_manual(values=c("dodgerblue4", "darkolivegreen4",
+                              "darkorchid3", "goldenrod1","pink"))
+
+ggsave(filename="~/presentations/LIMAA_updates/pics/G1K-REGION-PCs.pdf",width=5,height=4)
+
+df1<-df
+df1$REGION[df1$REGION=="AMR"]<-df1$POP[df1$REGION=="AMR"]
+ggplot(df1,aes(x=V3,y=V4,colour=REGION))+geom_point()+xlab("PC1")+ylab("PC2")+theme_bw()+
+  scale_color_manual(values=c("dodgerblue4", "darkolivegreen4",
+                              "darkorchid3", "goldenrod1","black","orange","darkred","grey"))
+
+ggsave(filename="G1K-AMR-others-PCs.pdf",width=5,height=4)
+
+"""
+}
+
+pca = segment {pcs + pca_plot}
+//################
+//# ADMIXTURE 
+//################
+admixture = {
+	// Choose the optimal K
+	exec """ for K in {3..5}
+	do
+ 	$ADMIXTURE --cv prunedALL.bed $K -j32 | tee log${K}.out; done
+	done
+	"""
+}
+
+admixture_plot = R{"""
+	pop<-read.table("g1k_samples.txt",h=T,stringsAsFactors = F)
+
+	fam<-read.table(paste($G1K,".fam"),h=F,stringsAsFactors = F)
+
+	fam$REGION<-pop[match(fam$V1,pop$sample),]$super_pop
+	fam$POP<-pop[match(fam$V1,pop$sample),]$pop
+
+	pop.names<-unique(sort(fam$REGION))
+	par(mfrow=c(6,1), mai = c(0, 0.1, 0.1, 0.1), tcl=-1)
+
+	Cols<-palette(c(rgb(197,95,75, maxColorValue=255),
+  	rgb(152,191,84, maxColorValue=255),
+  	rgb(163,98,181, maxColorValue=255),
+  	rgb(149,184,182, maxColorValue=255),
+  	rgb(83,70,64, maxColorValue=255)))
+
+	png(file="g1k_admixture_super_pop.png",height=768,width=1024)
+	n=5
+	x=read.table(paste("prunedALL.",n,".Q",sep=""))
+	tbl<-x[sort(fam$POP,index.return=T)$ix,]
+	fam<-fam[sort(fam$POP,index.return=T)$ix,]
+	fam$REGION[fam$REGION=="AMR"]<-fam$POP[fam$REGION=="AMR"]
+	num<-table(fam$REGION)
+	pop.order<-c("PEL","CLM","MXL","PUR","EUR","AFR","SAS","EAS")
+	df<-t(tbl[order(match(fam$REGION,pop.order)),])
+
+	barplot(df, space=0,col=Cols, border=NA,xaxt="n",yaxt="n")
+	x<-num[order(match(names(num),pop.order))]
+	for (i in 1:nrow(num)){
+  		abline(v=sum(x[1:i]),lwd=3,col="black")
+	}	
+
+	dev.off()	
+"""}
+
+Bpipe.run{pruning + [pca +  admixture] }
